@@ -1,0 +1,795 @@
+---
+title: "STA141A Final Project"
+author: "Stella Liu, ID: 922136324"
+date: "2025-03-17"
+output: html_document
+---
+
+```{r, results='asis', echo=FALSE}
+cat("\\newpage") #new page
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret) 
+library(class)
+library(dplyr)
+library(factoextra)
+library(ggplot2)
+library(glmnet)
+library(kableExtra)
+library(kernlab)
+library(knitr)
+library(MASS)
+library(nycflights13)
+library(stats)
+library(tidyverse)
+library(cluster)
+library(caTools)
+library(ROCR)
+library(GGally)
+```
+
+```{r include=FALSE}
+session=list()
+#n.session=length(session)
+
+for(i in 1:18){
+  session[[i]]=readRDS(paste0('./Data/session',i,'.rds',sep=''))
+}
+```
+
+## Abstract 
+In this project, I will generate tables to analyze factors across sessions, perform exploratory analysis of data, and conduct exploratory data analysis. Explore neural activities during each trial and explore the changes across trials. Incorporating ROC curves, PCA, and confusion matrices for further assessment for classification performance. I will generate and interpret the AUC and AIC values, and misclassification rates. With those findings I will perform data integration and model training for prediction of outcomes with test sets. 
+
+## Section 1: Introduction 
+In this project, I will analyze a subset of data collected by Steinmetz et al. (2019) to predict outcomes in the form of feedback type (-1 for negative failure and 1 positive success), in response to random visual stimuli presented to the four mice.
+
+The dataset contains 18 sessions, each with multiple trials. There are five variables for each trial: "feedback_type", "contrasts", "time", "spks", and "brain_area". 
+
+"Feedback_type" represents the type of the outcome, 1 for success and -1 for failure. Variable "time" refers to the time bins at which "spks" are recorded, where "spks" represent the numbers of spikes of neurons in the visual cortex. The variable "brain_area" represents the area of the brain where the neurons are. "Contrasts" represented the contrast either on the left or right, the stimuli stood at different contrast levels, {0, 0.25, 0.5, 1}, 0 indicates no stimuli while 1 is the maximum level. 
+
+The mice had to make decisions in response to the visual stimuli, with their fore paws they could react on a wheel. The feedback was then administered, with either a reward (success) or penalty (failure). 
+
+The primary objective of this project is to build a predictive model that predicts the outcome in terms of feedback type of each trial using the neural activity along with the stimuli.
+
+## Section 2: Exploratory analysis 
+### (i). Describe the data structures across sessions 
+```{r include=FALSE}
+ls(session[[i]]) #variables
+summary(session[[1]]) #ex: session 1
+dim(session[[1]]$spks[[1]]) # size of columns
+
+#describe the data structures across sessions 
+str(session[[1]]) #structure of first session
+#lapply(session, str) #structure of all sessions
+
+#number of neurons (spikes of neuron)
+sapply(session, function(x) length(unique(x$spks)))
+
+lapply(session, summary)
+```
+We explore the data structure across sessions, we explore the variables specifically in one session (session 1). Specifically there are variables contrast left and right, feedback, brain area, spikes, and the associated mouse name, date of experiment, and time. This suggests that each trial focuses on one mouse on one day. 
+Then observing variable's number of occurrences and type, we can explore the average success rate and the average number of spikes per neuron specific to each brain region, discussing how this correlates to different stimuli and feedback type. 
+
+```{r include=FALSE}
+n_success = 0
+n_trial = 0
+for(i in 1:18){
+    tmp = session[[i]];
+    n_trial = n_trial + length(tmp$feedback_type);
+    n_success = n_success + sum(tmp$feedback_type == 1);
+}
+n_success/n_trial
+```
+We can explore this through dividing the number of success by the number of trials, getting the success rate. In this session specifically, over 70% trials are successes. 
+
+```{r include=FALSE}
+unique(session[[1]]$brain_area) 
+
+area = c()
+for(i in 1:18){
+    tmp = session[[i]];
+    area = c(area, unique(tmp$brain_area))
+}
+area = unique(area)
+length(area)
+```
+Exploring the different brain areas, there are 62 unique levels in brain area. 
+
+```{r, echo=FALSE}
+n.session=3
+
+# First summary table
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  dim_neurons = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session))
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  
+  meta[i,1]=tmp$mouse_name;#for first entry, name
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));#number of unique brain areas
+  meta[i,4]=dim(tmp$spks[[1]])[1];#dim of matrix
+  meta[i,5]=length(tmp$spks[[i]]);#how many spikes
+  meta[i,6]=length(tmp$feedback_type);#how many trials 
+}
+trial_num = seq(1, n.session)
+
+meta <- meta %>% add_column(session_number = trial_num, .before = 1)
+
+meta <- meta %>%
+  rename(
+    Session =session_number,  
+    Mouse=mouse_name,  
+    Date=date_exp, 
+    Brain_area = n_brain_area,
+    Dim_neurons=dim_neurons,
+    Neurons=n_neurons,
+    Trials =n_trials
+  )
+
+kable(meta, format = "html", table.attr = "class='table table-striped'", digits = 2,
+      caption = "Summary of Session data") %>%
+  column_spec(2, background = "#A9A9A9", color = "white") %>% 
+  column_spec(3, background = "#A9A9A9", color = "white") %>%  
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  footnote(general ="Table summarizes the session data, highlighting the number of brain areas, neurons, and trials.")
+
+# Second table
+meta1 <- tibble(
+  Mouse_name = rep('name',n.session),
+  Success_rate = rep(0,n.session),
+  Outcome_rate =rep(0,n.session),
+  Z_score = rep(0,n.session))
+  
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta1[i,1]=tmp$mouse_name;#for first entry, name
+  meta1[i,2]=mean(tmp$feedback_type+1)/2; #success_rate
+  meta1[i,3]=sum(tmp$feedback_type)/length(tmp$feedback_type);
+  meta1[i,4] = (tmp$spks[[i]][i] - mean(tmp$spks[[i]])) / sd(tmp$spks[[i]])
+}
+meta1 <- meta1 %>% add_column(Session_number = trial_num, .before = 1)
+
+# feedback types 
+kable(meta1, format = "html", table.attr = "class='table table-striped'", digits = 2,
+      caption = "Summary of Data") %>%
+  kable_styling(full_width = FALSE, bootstrap_options = c("striped", "hover")) %>%
+  column_spec(2, background = "#A9A9A9", color = "white") %>% 
+  footnote(general ="Table summarizes the session data, highlighting feedback types such as the average sucess rate, average rate of feedback, and average Z score. We observe a consistent sucess and outcome rate, accompanied by a small z-score, suggesting stable performance and minor deviations.")
+
+summary(meta1, table.attr = "class='table table-striped'",digits=2)
+
+summary(meta, table.attr = "class='table table-striped'",digits=2) 
+```
+
+### (ii). Explore the neural activities during each trial
+
+We will explore neural activity in terms of average number of spikes across neurons in each brain area.  
+
+```{r include=FALSE}
+i.s=5 #session
+i.t=1 #trial 
+
+spk.trial = session[[i.s]]$spks[[i.t]]
+area=session[[i.s]]$brain_area
+
+# number of spikes for each neuron
+spk.count=apply(spk.trial,1,sum)
+spk.count2=apply(spk.trial,2,sum)
+
+# average of spikes across neurons that live in the same area 
+spk.average.tapply=tapply(spk.count, area, mean)
+spk.average.tapply=tapply(spk.count, area, median)
+
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+  }
+average_spike_area(1,this_session = session[[i.s]])
+```
+
+```{r, echo=FALSE}
+n.trial=length(session[[i.s]]$feedback_type)
+n.area=length(unique(session[[i.s]]$brain_area ))
+
+# summary highlighting average spike counts for each area, feedback type, contrasts, and the trial id
+trial.summary =matrix(nrow=n.trial,ncol= n.area+1+2+1)
+for(i.t in 1:n.trial){
+  trial.summary[i.t,]=c(average_spike_area(i.t,this_session = session[[i.s]]),
+  session[[i.s]]$feedback_type[i.t],
+  session[[i.s]]$contrast_left[i.t],
+  session[[i.s]]$contrast_right[i.s],
+i.t)
+}
+
+colnames(trial.summary)=c(names(average_spike_area(i.t,this_session = session[[i.s]])), 'feedback', 'left contr.','right contr.','id' )
+
+(trial.summary <- as_tibble(trial.summary))
+```
+This table summarizes the average number of spikes across neurons in each brain area and provided information about the corresponding feedback and stimuli for each session, allowing further discussion of the relationship between variables and better visualization. 
+
+```{r, echo=FALSE}
+#visualize 
+area.col=rainbow(n=n.area,alpha=0.7)
+
+plot(x=1,y=0, col='white',xlim=c(0,n.trial),ylim=c(0.5,2.2), xlab="Trials",ylab="Average spike counts", main=paste("Spikes per area in Session", i.s))
+#empty
+
+for(i in 1:n.area){
+  lines(y=trial.summary[[i]],x=trial.summary$id,col=area.col[i],lty=2,lwd=1) 
+  lines(smooth.spline(trial.summary$id, trial.summary[[i]]),col=area.col[i],lwd=3)
+}
+
+legend("topright", 
+  legend = colnames(trial.summary)[1:n.area], 
+  col = area.col, 
+  lty = 1, 
+  cex = 0.8
+)
+```
+
+Plot above visualizes average spike counts vs the number of trials, highlighting the behavior across different brain areas during a session. Dashed lines represent raw data while smooth lines depict the trend. 
+
+Through visualizing the raw observations, we observe that most significant variation center around 0 to 2.0 average spikes counts, on the x-axis around 0-180 trials. We limit the range accordingly and incorporate smooth lines for more information.
+
+```{r, echo=FALSE}
+df <- as.data.frame(trial.summary)
+df$id <- sample(trial.summary$id)  
+df_long <- pivot_longer(df, cols = -id, names_to = "Brain_Area", values_to = "Spike_Counts")
+
+ggplot(df_long, aes(x = id, y = Spike_Counts, color = Brain_Area)) +
+  geom_line(aes(group = Brain_Area), linetype = "dashed", size = 0.8, alpha = 0.7) +  
+  geom_smooth(method = "loess", se = FALSE, size = 1.5) +  
+  labs(title = paste("Spikes per area in Session", i.s),
+       x = "Trials",
+       y = "Average Spike Counts") +
+  coord_cartesian(xlim = c(0, 180))+
+    coord_cartesian(ylim = c(0, 2))
+```
+
+The plot suggests that most brain areas have a constant spike count across trials, with occasional fluctuation at different amounts. DG experiences the most change, decreasing at 50 trials and increasing around 100 trials. 
+
+Most have an average spike count less than 1, with DG and root have exceptionally high averages. 
+
+There is a slight fluctuation around 150-200 trials, suggesting more neural activity, followed by an overall decrease in spike count beyond the 200th trials. This might be due to neural and behavior unresponsiveness or change in performance.
+
+```{r, echo=FALSE}
+suppressMessages(library(tidyverse))
+failure_rate_session <- function(session){
+  num_failures <- sum(session$feedback_type == -1)
+  total_trials <- length(session$feedback_type)
+  failure_rate <- num_failures / total_trials
+  return(failure_rate)
+}
+
+failure_rates <- sapply(session, failure_rate_session)
+failure_rates_df <- data.frame(
+  session = 1:length(failure_rates),
+  failure_rate = failure_rates
+)
+ggplot(failure_rates_df, aes(x=session, y=failure_rate)) +
+  geom_line() +
+  geom_point() +
+  labs(x="Session", y="Failure Rate") +
+  scale_x_continuous(breaks = 1:length(failure_rates)) 
+```
+
+Graph above summarizes average number of failure rate across sessions. We observe an overall decrease in trend. This suggests that as more sessions were performed, mice experienced higher success rates, learning through the process and improving their performance. It could also suggest a change in neural activity in response to the stimuli.
+
+### (iii). Explore the changes across trials
+```{r include=FALSE}
+plot.trial<-function(i.t,area, area.col,this_session){
+    spks=this_session$spks[[i.t]];
+    n.neuron=dim(spks)[1]
+    time.points=this_session$time[[i.t]]
+    
+    plot(0,0,xlim=c(min(time.points),max(time.points)),ylim=c(0,n.neuron+1),col='white', xlab='Time',yaxt='n', ylab='Neuron', main=paste('Trial ',i.t, 'feedback', this_session$feedback_type[i.t] ),cex.lab=1.5)
+    for(i in 1:n.neuron){
+        i.a=which(area== this_session$brain_area[i]);
+        col.this=area.col[i.a]
+        
+        ids.spike=which(spks[i,]>0) # find out when there are spikes 
+        if( length(ids.spike)>0 ){
+            points(x=time.points[ids.spike],y=rep(i, length(ids.spike) ),pch='.',cex=2, col=col.this)
+        }
+    }
+legend("topright", 
+  legend = area, 
+  col = area.col, 
+  pch = 16, 
+  cex = 0.8
+  )
+}
+```
+
+```{r, fig.width=8, fig.height=8}
+varname=names(trial.summary);
+area=varname[1:(length(varname)-4)]
+par(mfrow=c(1,2))
+
+plot.trial(1,area, area.col,session[[i.s]])
+for (i in 1:length(area)) {
+  points(trial.summary$id, trial.summary[[area[i]]], col = area.col[i], pch = 19, cex = 10) 
+}
+grid(col = "gray", lty = "dotted")
+
+plot.trial(2,area, area.col,session[[i.s]])
+for (i in 1:length(area)) {
+  points(trial.summary$id, trial.summary[[area[i]]], col = area.col[i], pch = 19, cex = 10) 
+}
+grid(col = "gray", lty = "dotted")
+
+```
+
+The graphs demonstrate neural activity in terms of average spike per brain area across time.  
+
+By comparing graph of trial 1 and trial 2, we observe trial 1 ranges from 57-58 seconds while trial 2 ranges from 63.7-64 seconds, trial 2 has a shorter time span and longer average time. There are also more data points in trial 1. In terms of neurons, the distribution are similar and consistent, suggesting stable feedback across trials.
+
+```{r, echo=FALSE}
+varname = names(trial.summary)
+area = varname[1:(length(varname)-4)]
+
+plot.trial(1, area, area.col, session[[i.s]])
+for (i in 1:length(area)) {
+  # Compress y-value
+  compressed_y_values = trial.summary[[area[i]]] / 2 
+  
+  points(trial.summary$id, compressed_y_values, col = area.col[i], pch = 19, cex = 2)
+}
+grid(col = "gray", lty = "dotted")
+
+varname = names(trial.summary)
+area = varname[2:(length(varname)-4)]
+
+plot.trial(2, area, area.col, session[[i.s]])
+for (i in 1:length(area)) {
+  # Compress y-value
+  compressed_y_values = trial.summary[[area[i]]] / 2 
+  
+  points(trial.summary$id, compressed_y_values, col = area.col[i], pch = 19, cex = 2)
+}
+grid(col = "gray", lty = "dotted")
+```
+
+With compressed graphs, variation between values become more pronounced, highlighting stronger neural activity in specific areas. Different trials involve different conditions that may lead to varying neural responses. However, we notice that brain areas involved in different trials are different, this makes the visualization difficult to compare and might skew results.
+
+### (iv) Explore homogeneity and heterogeneity across sessions and mice
+
+
+Benchmark method: 
+For each trial, we take the summation of spikes for each neuron, getting the total number of spikes for all neurons during the 0.4 seconds in that trial; then we take the average of the total number of spikes.
+
+```{r, echo=FALSE}
+# matrix to scalar 
+spks.trial=session[[1]]$spks[[1]] 
+total.spikes=apply(spks.trial,1,sum)
+avg.spikes=mean(total.spikes)
+
+# proportion of active neurons (neurons with non-zero spikes) 
+mean(total.spikes>0 )
+
+# avg spike per active neuron 
+mean( total.spikes[total.spikes>0] )
+avg.spikes=mean(total.spikes)
+
+firing.rate=apply(spks.trial,2,mean)
+plot(firing.rate, type = 'l', xlim = c(0, 30), main = "Firing Rate Over Time", xlab = "Time", ylab = "Firing Rate")
+```
+
+Observing the firing rate over time, most amount of change occurs over the 0-30 range, not a lot occurs over the 30-40 interval. This might be due to initial neural responses being more intense, the brain then gets used to the stimuli after some time. Thus we limit the range, focusing on the segment of data that indicates the critical time period of neural activity and decision making.
+
+```{r, echo=FALSE}
+n_obs = length(session[[18]]$feedback_type)
+
+dat = tibble(
+    feedback_type = as.factor(session[[18]]$feedback_type),
+    decision = rep('name', n_obs),
+    avg_spikes = rep(0, n_obs)
+)
+
+for (i in 1:n_obs){
+    # decision 
+    if (session[[18]]$contrast_left[i] > session[[18]]$contrast_right[i]){
+        dat$decision[i] = '1' 
+    } else if (session[[18]]$contrast_left[i] < session[[18]]$contrast_right[i]){
+        dat$decision[i] = '2' 
+    } else if (session[[18]]$contrast_left[i] == session[[18]]$contrast_right[i] 
+               & session[[18]]$contrast_left[i] == 0){
+        dat$decision[i] = '3' 
+    } else{
+        dat$decision[i] = '4' 
+    }
+    
+    spks.trial = session[[18]]$spks[[i]]
+    total.spikes = apply(spks.trial, 1, sum)
+    dat$avg_spikes[i] = mean(total.spikes)
+}
+
+dat$decision = as.factor(dat$decision)
+summary(dat)
+
+# train and test data
+set.seed(101)
+sample <- sample.int(n = n_obs, size = floor(.8 * n_obs), replace = F)
+train <- dat[sample, ]
+test  <- dat[-sample, ]
+
+fit1 <- glm(feedback_type~., data = train, family="binomial")
+summary(fit1)
+
+pred1 <- predict(fit1, test[, !names(test) %in% "feedback_type"], type = 'response')
+prediction1 <- factor(pred1 > 0.5, labels = c('-1', '1'))
+mean(prediction1 != test$feedback_type)
+```
+The prediction error is about 23%, and AIC 147.34. 
+
+```{r, echo=FALSE}
+cm <- confusionMatrix(prediction1, test$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+```{r, echo=FALSE}
+prediction0 = factor(rep('1', nrow(test)), levels = c('1', '-1'))
+mean(prediction0 != test$feedback_type)
+
+cm <- confusionMatrix(prediction0, test$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+The confusion matrix of prediction1 and prediction0 reflect model performance with respect to the feedback type. 
+
+The first is a reflection of model performance in predicting the feedback type. We can observe that the frequency of correctly predicting a true positive feedback (1) is 33, correctly predicting a true negative is 1, false positive of 9, and false negative of 1.
+
+Since the matrix is concentrated in the diagonal, the model is performing well. However, the frequency of false positives is high, indicating an over-prediction of positive feedback. 
+In terms of model 2, it represents a biased guess, resulting in a frequency of true positives 34, and for false positives 10. This shows little improvement with consistent performance between the two models.
+
+## Section 3: Data integration 
+```{r, echo=FALSE}
+table(session[[18]]$brain_area)
+
+average_spike_area<-function(i.t,this_session){
+  spk.trial = this_session$spks[[i.t]]
+  area= this_session$brain_area
+  spk.count=apply(spk.trial,1,sum)
+  spk.average.tapply=tapply(spk.count, area, mean)
+  return(spk.average.tapply)
+}
+n_area = length(unique(session[[18]]$brain_area))
+spk_area = matrix(rep(0, n_obs * n_area), n_obs, n_area)
+for (i in 1:n_obs){
+    spk_area[i,] = average_spike_area(i, session[[18]])
+}
+
+spk_area = as_tibble(spk_area)
+colnames(spk_area)= unique(session[[18]]$brain_area)
+dat1 = bind_cols(dat, spk_area) #%>% select(-avg_spikes)
+head(dat1)
+
+# train and test data
+set.seed(101)
+sample <- sample.int(n = n_obs, size = floor(.8 * n_obs), replace = F)
+train <- dat1[sample, ]
+test  <- dat1[-sample, ]
+fit2 <- glm(feedback_type~., data = train, family="binomial")
+summary(fit2)
+
+pred2 <- predict(fit2, test, type = 'response')
+
+prediction2 <- factor(pred2 > 0.5, labels = c('-1', '1'))
+mean(prediction2 != test$feedback_type)
+```
+The prediction error on the test data set is 25%, worse than the first model's 23%.
+
+While null deviance remained the same, residual deviance dropped from 137.34 to 118.94, indicating less error after fitting the model with predictors. Suggesting that predictors are contributing to the model.
+
+The AIC is 146.94, slightly lower than the first model's 147.34, lower AIC suggests better balance of goodness-of-fit, indicating slight model improvement. 
+
+```{r, echo=FALSE}
+cm <- confusionMatrix(prediction2, test$feedback_type, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+```
+
+The frequency of correctly predicting a true positive feedback (1) is 31, correctly predicting a true negative is 2, false positive of 8, and false negative of 3. The frequency of false positives is still high with slight improvements, while negative predictions in general have increased, slightly balancing the over-prediction of positive feedbacks. 
+
+```{r, echo=FALSE}
+pred1 <- as.numeric(as.character(pred1))
+pred2 <- as.numeric(as.character(pred2))
+
+# Model 1
+pr = prediction(pred1, test$feedback_type)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+
+# Model 2
+pr = prediction(pred2, test$feedback_type)
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc2 <- performance(pr, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+
+# Bias guess
+pred0 = pred1 * 0 + 1
+pr = prediction(pred0, test$feedback_type)
+prf0 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc0 <- performance(pr, measure = "auc")
+auc0 <- auc0@y.values[[1]]
+
+plot(prf2, ,col = 'red', main = 'ROC curve')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf0, add = TRUE, col = 'green')
+legend("bottomright", legend=c("Model 1", "Model 2", "Bias Guess"), col=c("blue", "red", 'green'), lty=1:1, 
+       cex=0.8)
+
+# AUC 
+print(c(auc, auc2, auc0))
+```
+From ROC curve, we observe that Mode 1 and Model 2 have similar performances, Model 2 is slightly above Model 1 at times.
+From the AUC, Model 2 is slightly better, with 0.6941176 compared to the other 0.6558824.
+
+```{r, echo=FALSE}
+#EDA
+summary(dat1)
+
+ggplot(dat1, aes(x = feedback_type)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Distribution of Feedback Type", x = "Feedback Type", y = "Count")
+
+ggplot(dat1, aes(x = feedback_type, y = avg_spikes)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Spiking Activity by Feedback Type", x = "Feedback Type", y = "Average Spikes")
+
+dat1$left_contrast <- session[[18]]$contrast_left
+dat1$right_contrast <- session[[18]]$contrast_right
+ggplot(dat1, aes(x = left_contrast, y = right_contrast, color = feedback_type)) +
+  geom_point(alpha = 0.7) +
+  labs(title = "Left vs. Right Contrast by Feedback Type", x = "Left Contrast", y = "Right Contrast")
+```
+
+In this section we perform Exploratory Data Analysis. On the distribution of feedback type bar chart, we observe significantly more positive feedbacks compared to the negatives, showing an imbalance in frequency, affecting the model performance. 
+
+The spiking activity by feedback type box plot shows that negative and positive feedbacks have significantly different average spiking activity, suggesting that average spikes can be a significant predictor in later models. 
+
+On the left vs. right contrast by feedback type scatter plot, we observe overlap between the two feedback, suggesting the variable contrasts to be less significant in distinguishing and predicting.
+
+In the following section, we standardize the data and find the PCA. Results from PCA analysis suggests that PC1 is the best since it explains the most variation, standing at 48.16%. It also has the highest standard deviation of 1.2020 compared to PC2 0.9924 and PC3 0.7553. With PC1 and PC2 combined, over 80% of the variance in the data is explained.
+
+```{r, echo=FALSE}
+# Standardize the data (important for PCA)
+dat_pca <- dat1[, c("avg_spikes", "left_contrast", "right_contrast")]
+dat_pca_scaled <- scale(dat_pca)
+
+pca_result <- prcomp(dat_pca_scaled, center = TRUE, scale. = TRUE)
+
+summary(pca_result)
+```
+
+```{r, echo=FALSE}
+pca_data <- as.data.frame(pca_result$x)
+pca_data$feedback_type <- dat1$feedback_type
+
+head(pca_data)
+
+set.seed(101)
+sample <- sample.int(n = n_obs, size = floor(.8 * n_obs), replace = F)
+train <- pca_data[sample, ]
+test  <- pca_data[-sample, ]
+
+fit_pca <- glm(feedback_type ~ PC1+PC2, data = train, family = "binomial")
+summary(fit_pca)
+
+pred_pca <- predict(fit_pca, test, type = 'response')
+
+prediction_pca <- factor(ifelse(pred_pca > 0.5, '1', '-1'), levels = c('-1', '1'))
+
+mean(prediction_pca != test$feedback_type)
+
+pr_pca <- prediction(pred_pca, test$feedback_type)
+
+prf_pca <- performance(pr_pca, measure = "tpr", x.measure = "fpr")
+auc_pca <- performance(pr_pca, measure = "auc")
+auc_pca_value <- auc_pca@y.values[[1]]
+
+plot(prf_pca, col = 'blue', main = 'ROC Curve - PCA Model')
+legend("bottomright", legend = c("PCA Model"), col = c("blue"), lty = 1:1, cex = 0.8)
+
+print(c(auc, auc2, auc_pca_value))
+```
+We perform confusion matrix with PCA, discovering an AUC lower than that of model 1 and 2, meaning it did not improve performance. At the same time, the AIC increased, supporting the previous conclusion. This outcome is possibly due to reduced information and decreased prediction power. 
+
+```{r, echo=FALSE}
+session.summary <- list()
+
+for (i in 1:18){
+  trial_summary = data.frame(
+    session_number = numeric(),
+    feedback_type = numeric(),
+    contrast_left = numeric(),
+    contrast_right = numeric(),
+    total_neuron_count = numeric(),
+    spk_mean = numeric()
+  )
+  
+  for (j in 1:length(session[[i]]$feedback_type)){
+    spks.mean = mean(c(session[[i]]$spks[[j]]))
+    spks.sd = sd(c(session[[i]]$spks[[j]]))
+    
+    trial_summary = rbind(trial_summary, data.frame(
+      session_number = i,
+      feedback_type = session[[i]]$feedback_type[[j]],
+      contrast_left = session[[i]]$contrast_left[[j]],
+      contrast_right = session[[i]]$contrast_right[[j]],
+      total_neuron_count = dim(session[[i]]$spks[[1]])[1],
+      spks_mean = spks.mean
+    ))
+  }
+  session.summary[[i]] = trial_summary
+}
+
+sessions_combined = bind_rows(session.summary)
+
+clustering_data <- sessions_combined[, c("contrast_left", "contrast_right", "spks_mean","total_neuron_count")]
+
+clustering_data <- scale(clustering_data)
+
+pca.result <- prcomp(clustering_data)
+ 
+k <- 4
+kmeans_result <- kmeans(clustering_data, centers=k)
+sessions_combined$cluster <- kmeans_result$cluster
+
+fviz_cluster(list(data = pca.result$x[, 1:2], cluster = sessions_combined$cluster))
+```
+
+With clustering we visualize across PC1 and 2, setting k=4 since there's not enough information below 4 and too much overlapping above 4.
+
+## Section 4: Predictive modeling  
+```{r, echo=FALSE}
+set.seed(125)
+split1 = sample.split(sessions_combined$feedback_type, SplitRatio = 0.75, group = NULL)
+training_set = sessions_combined[split1, 2:7]
+test_set = sessions_combined[!split1, 2:7]
+
+
+logit_model <- glm(feedback_type~spks_mean, data = training_set, family="gaussian")
+
+estimates_table <- summary(logit_model)$ coef
+
+logit_predictions <- predict(logit_model, newdata = test_set, type = "response")
+predicted_class <- ifelse(logit_predictions > 0.6, "-1", "1")
+confusion_matrix <- table(Actual = test_set$feedback_type, predicted = predicted_class)
+misclassification_rate <- 1 - sum(diag(confusion_matrix))/sum(confusion_matrix)
+
+print("Model parameter estimates and standard errors")
+print(estimates_table)
+cat("Misclassification Error Rate:", misclassification_rate, "\n")
+confusion_matrix
+```
+The confusion matrix demonstrates that 18 observations are correct negative predictions. 350 are wrongly predicted as 1. 87 are wrongly predicted as -1. 815 observations are correctly predicted as 1.
+
+A misclassification error rate of 0.3440945 displays the performance of the model and the proportion of observations that are incorrectly classified or predicted. Approximately 34% of the observations are incorrectly classified, indicating a 66% accuracy.
+
+## Section 5: Prediction performance on the test sets
+```{r, echo=FALSE}
+test=list()
+
+for(i in 1:2){
+  test[[i]]=readRDS(paste0('./test/test',i,'.rds',sep=''))
+}
+
+test.summary <- list()
+for (i in 1:2){
+  trial_summary = data.frame(
+    test_number = numeric(),
+    feedback_type = numeric(),
+    contrast_left = numeric(),
+    contrast_right = numeric(),
+    total_neuron_count = numeric(),
+    spk_mean = numeric(),
+    spk_standard_deviation = numeric()
+  )
+  
+  for (j in 1:length(test[[i]]$feedback_type)){
+    spks.mean = mean(c(test[[i]]$spks[[j]]))
+    spks.sd = sd(c(test[[i]]$spks[[j]]))
+    trial_summary = rbind(trial_summary, data.frame(
+      test_number = i,
+      feedback_type = test[[i]]$feedback_type[[j]],
+      contrast_left = test[[i]]$contrast_left[[j]],
+      contrast_right = test[[i]]$contrast_right[[j]],
+      total_neuron_count = dim(test[[i]]$spks[[1]])[1],
+      spks_mean = spks.mean,
+      spks_standard_deviation = spks.sd
+    ))
+  }
+  test.summary[[i]] = trial_summary
+}
+tests_combined = bind_rows(test.summary)
+
+set.seed(123)
+split1 = sample.split(tests_combined$feedback_type, SplitRatio = 0.75, group = NULL)
+training_set = sessions_combined[split1, 2:7]
+test_set = tests_combined
+```
+
+```{r, echo=FALSE}
+logit_model <- glm(feedback_type~spks_mean, data = training_set, family="gaussian")
+
+estimates_table <- summary(logit_model)$ coef
+
+logit_predictions <- predict(logit_model, newdata = test_set, type = "response")
+predicted_class <- ifelse(logit_predictions > 0.6, "-1", "1")
+confusion_matrix <- table(Actual = test_set$feedback_type, predicted = predicted_class)
+misclassification_rate <- 1 - sum(diag(confusion_matrix))/sum(confusion_matrix)
+
+print("Model parameter estimates and standard errors")
+print(estimates_table)
+cat("Misclassification Error Rate:", misclassification_rate, "\n")
+confusion_matrix
+```
+The confusion matrix demonstrates that 0 observations are correct negative predictions. 55 are wrongly predicted as 1. 1 is wrongly predicted as -1. 144 observations are correctly predicted as 1.
+
+A misclassification error rate of 0.28 displays the performance of the model and the proportion of observations that are incorrectly classified or predicted. Approximately 28% of the observations are incorrectly classified, indicating a 72% accuracy.
+
+## Section 6: Discussion 
+
+Based on the prediction results on our two test data set, it is evident that the model is weaker at predicting negative feedbacks than that of positives. This might be because of the imbalance in amount of positive versus negative feedback data points. There's a specifically higher amount of false positives.
+
+Overall we observed a decreasing failure rate across sessions, which suggests progress across sessions and mice performance improvement, which could contribute to the uneven distribution of feedback types in later sessions. 
+
+```{r, results='asis', echo=FALSE}
+cat("\\newpage") #new page
+```
+
+## Acknowledgement {-}
+
+Failing to acknowledge any non-original efforts will be counted as plagiarism. This incidence will be reported to the Student Judicial Affairs. 
+
+If you use generative AI to solve any questions, please provide your instructions,  conversations, and prompts here. 
+
+The ChatpGPT conversation used for completing this assignment:
+https://chatgpt.com/share/67d85517-bdac-8009-937d-daa0fa3835d8
+
+
+## Appendix: R code
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
+
+## Session information {-}
+```{r}
+sessionInfo()
+```
