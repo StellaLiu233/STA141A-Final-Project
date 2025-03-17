@@ -27,6 +27,7 @@ library(tidyverse)
 library(cluster)
 library(caTools)
 library(ROCR)
+library(pROC)
 library(GGally)
 ```
 
@@ -325,7 +326,7 @@ grid(col = "gray", lty = "dotted")
 
 plot.trial(2,area, area.col,session[[i.s]])
 for (i in 1:length(area)) {
-  points(trial.summary$id, trial.summary[[area[i]]], col = area.col[i], pch = 19, cex = 10) 
+  points(trial.summary$id, trial.summary[[area[i]]], col = area.col[i], pch = 19, cex = 1) 
 }
 grid(col = "gray", lty = "dotted")
 
@@ -759,14 +760,37 @@ print("Model parameter estimates and standard errors")
 print(estimates_table)
 cat("Misclassification Error Rate:", misclassification_rate, "\n")
 confusion_matrix
+
+confusion_matrix_plot <- ggplot(as.data.frame(confusion_matrix), aes(x = Actual, y = predicted)) +
+  geom_tile(aes(fill = Freq), color = "white") +
+  scale_fill_gradient(low="white", high="#009194") +
+  geom_text(aes(label = Freq), vjust = 1) +
+        scale_x_discrete(labels=c("-1","1")) +
+        scale_y_discrete(labels=c("-1","1"))
+  labs(title = "Confusion Matrix", x = "Actual", y = "Predicted")
+
+print(confusion_matrix_plot)
 ```
+
 The confusion matrix demonstrates that 0 observations are correct negative predictions. 55 are wrongly predicted as 1. 1 is wrongly predicted as -1. 144 observations are correctly predicted as 1.
 
 A misclassification error rate of 0.28 displays the performance of the model and the proportion of observations that are incorrectly classified or predicted. Approximately 28% of the observations are incorrectly classified, indicating a 72% accuracy.
 
+```{r, echo=FALSE}
+roc_curve <- roc(test_set$feedback_type, logit_predictions)
+roc_curve_plot <- ggroc(roc_curve) + 
+  theme_minimal() +
+  labs(title = "ROC Curve", x = "False positive rate", y = "True positive rate")
+
+print(roc_curve_plot)
+```
+
+
 ## Section 6: Discussion 
 
-Based on the prediction results on our two test data set, it is evident that the model is weaker at predicting negative feedbacks than that of positives. This might be because of the imbalance in amount of positive versus negative feedback data points. There's a specifically higher amount of false positives.
+Our prediction model resulted in reasonable accuracy in classification (72%), with improvement deviation, AIC, and predictions. However the confusion matrix highlights the imbalance in predicting positive vs negative feedback.   
+
+Based on prediction results on our datasets, it is evident that the model is weaker at predicting negative feedback than that of positives. This might be because of the imbalance in amount of positive versus negative feedback data points. There's a specifically higher amount of false positives that is a critical weakness.
 
 Overall we observed a decreasing failure rate across sessions, which suggests progress across sessions and mice performance improvement, which could contribute to the uneven distribution of feedback types in later sessions. 
 
